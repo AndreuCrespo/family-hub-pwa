@@ -9,17 +9,21 @@ import { errorText, householdTag, log } from './log';
 import {
   activityDigest,
   byCreation,
+  type ComputeInput,
   computeNotifications,
   DAY,
+  dailyGateHour,
   dailyKey,
+  everyone,
   householdTz,
-  isDailyWindow,
   KEYDATE_HOUR,
+  legacyDailyKey,
+  type Message,
   MINUTE,
-  notifySettings,
+  openDailyUids,
 } from './logic';
 import { parseActivity, parseHousehold } from './parse';
-import { type DeliveryReport, deliver, selectDevices } from './push';
+import { type DeliveryReport, deliver } from './push';
 import * as store from './store';
 
 /** Whatever someone adds within this interval is grouped into a single notification. */
@@ -79,7 +83,12 @@ async function processHousehold(db: Firestore, doc: QueryDocumentSnapshot, now: 
   if (!store.sameState(state, next)) await store.writeState(metaRef, next);
 }
 
-/** Computes, sends and records this run's notifications. Updates `next`; returns what was sent, if anything. */
+/**
+ * Computes, sends and records this run's notifications. Updates `next`; returns
+ * what was sent, if anything. People's choices (and the devices) are only read
+ * when something may be due: a reminder, a key date, activity, or a morning
+ * summary not yet done today.
+ */
 async function notifyHousehold(
   db: Firestore,
   ref: DocumentReference,
@@ -91,51 +100,71 @@ async function notifyHousehold(
   const { date: today, hour } = zonedParts(now, householdTz(household));
   const col = (name: string) => ref.collection(name);
 
-  // Tasks, menu and long events are only needed for the daily summary; key
-  // dates for it and once a day from KEYDATE_HOUR.
-  const needDaily = isDailyWindow(household, now) && !(dailyKey(today) in state.sent);
   const checkKeyDates = hour >= KEYDATE_HOUR && state.keyDatesOn !== today;
-  const [events, tasks, menuToday, keyDates, pending] = await Promise.all([
-    store.loadEvents(col('events'), today, needDaily),
-    needDaily ? store.loadPendingTasks(col('tasks')) : [],
-    needDaily ? store.loadMenuDay(col('menu'), today) : null,
-    needDaily || checkKeyDates ? store.loadKeyDates(col('dates')) : [],
+  const [events, keyDates, pending] = await Promise.all([
+    store.loadEvents(col('events'), today),
+    checkKeyDates ? store.loadKeyDates(col('dates')) : [],
     store.loadPendingActivity(col('activity')),
   ]);
   // Recent activity is notified right away by onActivityCreated; here only what it missed.
   const activity = pending.filter((a) => a.createdAt < now - ACTIVITY_FALLBACK_AGE);
-
-  const { messages, activityIdsToMark, quietKeys } = computeNotifications({
+  const base: Omit<ComputeInput, 'recipients'> = {
     household,
     events,
-    tasks,
-    menuToday,
+    tasks: [],
+    menuToday: null,
     keyDates,
     activity,
     now,
-  });
+  };
 
-  const sentKeys = new Set(Object.keys(state.sent));
+  // First as if everyone wanted everything (but the morning summary): is anything due at all?
+  const draft = computeNotifications({ ...base, recipients: everyone(household) });
+
+  const sent = new Set(Object.keys(state.sent));
   if (state.legacy) {
-    const keys = messages.flatMap((m) => (m.key ? [m.key] : []));
+    const keys = [legacyDailyKey(today), ...draft.messages.flatMap((m) => (m.key ? [m.key] : []))];
     for (const k of await store.legacySentKeys(db, col('notifyLog'), keys)) {
-      sentKeys.add(k);
+      sent.add(k);
       next.sent[k] = now;
     }
   }
-  const fresh = messages.filter((m) => !m.key || !sentKeys.has(m.key));
-  const report = fresh.length
-    ? await deliver(fresh, await store.loadDevices(col('devices')), household.memberUids)
-    : null;
+  // A household-wide summary recorded by an earlier version counts for everyone that day.
+  const dailyDone = (uid: string) => sent.has(dailyKey(today, uid)) || sent.has(legacyDailyKey(today));
+  const isFresh = (m: Message) =>
+    !m.key || !(sent.has(m.key) || (m.kind === 'daily' && sent.has(legacyDailyKey(today))));
+  const dailyPending = hour >= dailyGateHour(household) && household.memberUids.some((uid) => !dailyDone(uid));
+
+  let result = draft;
+  let report: DeliveryReport | null = null;
+  let fresh: Message[] = [];
+  if (dailyPending || draft.messages.some(isFresh)) {
+    const { devices, recipients } = await store.loadRecipients(db, ref, household);
+    let input: ComputeInput = { ...base, recipients };
+    // Tasks, menu and long events only when someone's morning summary is due now.
+    if (openDailyUids(recipients, hour).some((uid) => !dailyDone(uid))) {
+      const [tasks, menuToday, ongoing, kd] = await Promise.all([
+        store.loadPendingTasks(col('tasks')),
+        store.loadMenuDay(col('menu'), today),
+        store.loadOngoingEvents(col('events'), today),
+        checkKeyDates ? keyDates : store.loadKeyDates(col('dates')),
+      ]);
+      const more = ongoing.filter((e) => !events.some((x) => x.id === e.id));
+      input = { ...input, tasks, menuToday, events: [...events, ...more], keyDates: kd };
+    }
+    result = computeNotifications(input);
+    fresh = result.messages.filter(isFresh);
+    if (fresh.length) report = await deliver(fresh, devices);
+    for (const k of result.quietKeys) next.sent[k] ??= now;
+  }
 
   for (const k of report?.delivered ?? []) next.sent[k] = now;
-  for (const k of quietKeys) next.sent[k] ??= now;
   // Key dates are done for today unless one of them has to be retried.
   if (checkKeyDates && ![...(report?.failed ?? [])].some((k) => k.startsWith('kd_'))) next.keyDatesOn = today;
 
   const w = store.writer(db, household.id);
   for (const id of report?.goneDeviceIds ?? []) w.delete(col('devices').doc(id));
-  for (const id of activityIdsToMark) w.update(col('activity').doc(id), { notified: true });
+  for (const id of result.activityIdsToMark) w.update(col('activity').doc(id), { notified: true });
   await w.close();
 
   return report && { ...report, kinds: fresh.map((m) => m.kind).join(',') };
@@ -193,7 +222,8 @@ const newerPending = (recent: Activity[], mine: Activity) =>
 /**
  * Called when an activity document is created. Things a person adds in a row
  * ("milk, bread, eggs") arrive as a single notification: only the run of the
- * latest one waits and sends; the others step aside right away.
+ * latest one waits and sends; the others step aside right away. Each of the
+ * others gets the kinds they chose.
  */
 export async function processActivity(
   db: Firestore,
@@ -213,11 +243,12 @@ export async function processActivity(
   let recent = await burst();
   if (newerPending(recent, mine)) return;
 
-  const devicesCol = householdRef.collection('devices');
-  const devices = notifySettings(household).activity ? await store.loadDevices(devicesCol) : [];
-  const audience = mine.actorUid ? { excludeUid: mine.actorUid } : ('all' as const);
+  const { devices, recipients } = await store.loadRecipients(db, householdRef, household);
+  // Does anyone else want any of what this burst has so far?
+  const wanted = (list: Activity[]) =>
+    [...recipients].some(([uid, r]) => uid !== mine.actorUid && list.some((a) => r.activity[a.kind] === true));
   let gone: string[] = [];
-  if (selectDevices(devices, audience, household.memberUids).length) {
+  if (wanted(recent)) {
     const wait = Math.min(trigger.createTime + trigger.debounceMs - Date.now(), trigger.debounceMs);
     if (wait > 0) {
       await sleep(wait);
@@ -226,12 +257,15 @@ export async function processActivity(
     }
     if (!recent.some((a) => !a.notified)) return; // another run sent it meanwhile
     // Rebuilt with the whole burst so the new notification replaces the previous one.
-    const digest = activityDigest(recent, Date.now(), { includeNotified: true, members: household.members });
-    gone = (await deliver(digest, devices, household.memberUids)).goneDeviceIds;
+    const digest = activityDigest(recent, Date.now(), recipients, {
+      includeNotified: true,
+      members: household.members,
+    });
+    if (digest.length) gone = (await deliver(digest, devices)).goneDeviceIds;
   }
-  // Marked even if nobody could be told, so the scheduled job doesn't pick it up.
+  // Marked even if nobody wanted it, so the scheduled job doesn't pick it up.
   const w = store.writer(db, hid);
   for (const a of recent) if (!a.notified) w.update(activityCol.doc(a.id), { notified: true });
-  for (const id of gone) w.delete(devicesCol.doc(id));
+  for (const id of gone) w.delete(householdRef.collection('devices').doc(id));
   await w.close();
 }

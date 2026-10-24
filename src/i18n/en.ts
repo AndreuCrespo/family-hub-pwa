@@ -514,9 +514,11 @@ export const en: Record<keyof typeof es, string> = {
   'settings.notifications': 'Notifications',
   'settings.dailySummary': 'Morning summary',
   'settings.summaryTime': 'Summary time',
-  'settings.activity': 'Notify me when the other person adds things',
-  'settings.notifyTiming':
-    'What the other person adds arrives instantly. Reminders are checked every 5 minutes, so they can be up to 5 minutes late.',
+  'notify.othersAdd': 'Tell me when others add',
+  'notify.reminders': 'Event reminders',
+  'notify.keyDates': 'Upcoming key dates',
+  'notify.personalHint':
+    'Just for you: each person picks their own. Things someone adds in a row arrive as a single notification; reminders can be up to 5 minutes late.',
   'settings.customizeHint': 'Choose which cards you see and in what order (just for you)',
   'settings.appearance': 'Appearance',
   'settings.themeAuto': 'Automatic',

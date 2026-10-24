@@ -16,6 +16,7 @@ import type {
   Member,
   MenuDay,
   NotifySettings,
+  PersonalNotify,
   Recurrence,
   Task,
 } from '../../src/shared/types';
@@ -109,6 +110,14 @@ export function parseKeyDate(id: string, d: Data): KeyDate | null {
     remindDays: num(d.remindDays) ?? 0,
     amount: num(d.amount),
   };
+}
+
+/**
+ * A person's notification choices from prefs/{uid} (null without any).
+ * resolveNotify() checks each field, so only the shape matters here.
+ */
+export function parsePrefs(d: Data | undefined): PersonalNotify | null {
+  return d && isRecord(d.notify) ? (d.notify as PersonalNotify) : null;
 }
 
 export function parseMenuDay(id: string, d: Data): MenuDay {

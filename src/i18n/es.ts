@@ -514,9 +514,11 @@ export const es = {
   'settings.notifications': 'Notificaciones',
   'settings.dailySummary': 'Resumen del día por la mañana',
   'settings.summaryTime': 'Hora del resumen',
-  'settings.activity': 'Avisar cuando el otro añade cosas',
-  'settings.notifyTiming':
-    'Lo que añade el otro llega al momento. Los recordatorios se revisan cada 5 minutos, así que pueden llegar hasta 5 minutos tarde.',
+  'notify.othersAdd': 'Avisarme cuando los demás añaden',
+  'notify.reminders': 'Recordatorios de eventos',
+  'notify.keyDates': 'Fechas clave próximas',
+  'notify.personalHint':
+    'Solo para ti: cada persona elige sus avisos. Lo que alguien añade seguido llega en un único aviso; los recordatorios pueden llegar hasta 5 minutos tarde.',
   'settings.customizeHint': 'Elige qué tarjetas ves y en qué orden (solo para ti)',
   'settings.appearance': 'Apariencia',
   'settings.themeAuto': 'Automático',

@@ -458,6 +458,10 @@ textarea.input {
 .chip.on .dot {
   background: #fff;
 }
+/* Chips without a member or category color */
+.chip.neutral.on {
+  color: var(--bg);
+}
 .chip.sm {
   height: 30px;
   padding: 0 11px;

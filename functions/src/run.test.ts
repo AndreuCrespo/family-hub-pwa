@@ -77,7 +77,11 @@ const meta = (db: FakeFirestore, path = H) =>
   db.get(`${path}/meta/notifier`) as
     | { sent: Record<string, number>; keyDatesOn: string | null; cleanedOn: string | null }
     | undefined;
-const sentKeys = (db: FakeFirestore) => Object.keys(meta(db)?.sent ?? {}).sort();
+/** Recorded keys: the morning summaries' or the rest. */
+const sentKeys = (db: FakeFirestore, which: 'daily' | 'other' = 'other') =>
+  Object.keys(meta(db)?.sent ?? {})
+    .filter((k) => k.startsWith('daily_') === (which === 'daily'))
+    .sort();
 const instant = (db: FakeFirestore, id: string, debounceMs = 0, createTime = Date.now()) =>
   processActivity(asDb(db), href(db), id, { createTime, debounceMs });
 
@@ -273,7 +277,7 @@ test('scheduled: a daily summary with nothing to say is recorded once and not re
   db.seed(`${H}/tasks/t`, { title: 'Algún día', done: false, due: null });
   await processAllHouseholds(asDb(db), zonedToUtc('2026-10-22', '08:00', TZ));
   assert.equal(sent.length, 0);
-  assert.deepEqual(sentKeys(db), ['daily_2026-10-22']);
+  assert.deepEqual(sentKeys(db, 'daily'), ['daily_2026-10-22_uA', 'daily_2026-10-22_uB']);
   const tasksRead = db.readsUnder(`${H}/tasks`);
   assert.equal(tasksRead, 1);
   await processAllHouseholds(asDb(db), zonedToUtc('2026-10-22', '08:05', TZ));
@@ -570,4 +574,184 @@ test('instant: a missing household or activity does nothing', async () => {
   const empty = new FakeFirestore();
   await processActivity(asDb(empty), href(empty), 'x', { createTime: Date.now(), debounceMs: 0 });
   assert.equal(sent.length, 0);
+});
+
+// =====================================================================
+// Each person's choices (prefs/{uid}.notify)
+// =====================================================================
+
+const prefs = (db: FakeFirestore, uid: string, notify: Record<string, unknown>) =>
+  db.seed(`${H}/prefs/${uid}`, { notify, dashboard: [], updatedAt: 0 });
+const menuToday = (db: FakeFirestore) => db.seed(`${H}/menu/2026-10-22`, { lunch: 'Lentejas' });
+const at = (db: FakeFirestore, time: string, date = '2026-10-22') =>
+  processAllHouseholds(asDb(db), zonedToUtc(date, time, TZ));
+
+test('prefs, instant: each person only gets the kinds they chose', async () => {
+  const db = new FakeFirestore();
+  seedHousehold(db);
+  prefs(db, 'uA', { activity: { shopping: false } });
+  const now = Date.now();
+  db.seed(`${H}/activity/s1`, item('uB', 'Sam', 'leche', now - 2000));
+  const t = Date.now();
+  await instant(db, 's1', 5000, now - 2000);
+  assert.ok(Date.now() - t < 1000, 'nobody wants it: no waiting');
+  assert.equal(sent.length, 0);
+  assert.equal(db.get(`${H}/activity/s1`)?.notified, true);
+
+  db.seed(`${H}/activity/e1`, { ...item('uB', 'Sam', 'Cine', now - 1000), kind: 'event' });
+  await instant(db, 'e1');
+  assert.equal(sent.length, 1);
+  assert.equal(to(EP_A)?.body, 'Nuevo evento: Cine', 'the shopping line is left out');
+});
+
+test('prefs, instant: a mixed burst is filtered per person, the actor gets nothing', async () => {
+  const db = new FakeFirestore();
+  seedHousehold(db);
+  prefs(db, 'uA', { activity: { event: false } });
+  prefs(db, 'uB', { activity: { shopping: true, event: true } });
+  const now = Date.now();
+  db.seed(`${H}/activity/m1`, item('uB', 'Sam', 'leche', now - 3000));
+  db.seed(`${H}/activity/m2`, { ...item('uB', 'Sam', 'Cine', now - 2000), kind: 'event' });
+  db.seed(`${H}/activity/m3`, item('uB', 'Sam', 'pan', now - 1000));
+  for (const id of ['m1', 'm2', 'm3']) await instant(db, id);
+  assert.deepEqual(sent, [
+    {
+      endpoint: EP_A,
+      payload: {
+        title: 'Sam',
+        body: 'Ha añadido a la compra: leche y pan',
+        url: '/#/shopping',
+        tag: `act_uB_${now - 3000}`,
+      },
+      ttl: 3600,
+    },
+  ]);
+  for (const id of ['m1', 'm2', 'm3']) assert.equal(db.get(`${H}/activity/${id}`)?.notified, true);
+});
+
+test('prefs, scheduled: activity the instant path missed is filtered the same way', async () => {
+  const db = new FakeFirestore();
+  seedHousehold(db);
+  prefs(db, 'uB', { activity: { note: false } });
+  const now = zonedToUtc('2026-10-22', '16:00', TZ);
+  db.seed(`${H}/activity/n`, { ...item('uA', 'Alex', 'Wifi', now - 10 * MIN), kind: 'note' });
+  db.seed(`${H}/activity/t`, { ...item('uA', 'Alex', 'Basura', now - 10 * MIN), kind: 'task' });
+  await processAllHouseholds(asDb(db), now);
+  assert.equal(sent.length, 1);
+  assert.equal(to(EP_B)?.body, 'Nueva tarea: Basura');
+});
+
+test('prefs: event reminders and key dates only to whoever wants them', async () => {
+  const db = new FakeFirestore();
+  seedHousehold(db);
+  prefs(db, 'uB', { reminders: false });
+  prefs(db, 'uA', { keyDates: false });
+  db.seed(`${H}/events/dent`, dentist);
+  db.seed(`${H}/dates/b`, { title: 'Lía', kind: 'birthday', date: '2020-10-22', repeat: 'yearly', remindDays: 0 });
+  await processAllHouseholds(asDb(db), FIRE + MIN);
+  assert.deepEqual(
+    sent.map((s) => [s.endpoint, s.payload.title]),
+    [
+      [EP_A, 'Dentista'],
+      [EP_B, '🎂 Cumpleaños de Lía'],
+    ],
+  );
+});
+
+test('prefs: each person gets the morning summary at their own hour, once', async () => {
+  const db = new FakeFirestore();
+  seedHousehold(db);
+  menuToday(db);
+  prefs(db, 'uB', { dailyHour: 10 });
+  await at(db, '08:05');
+  assert.deepEqual(
+    sent.map((s) => [s.endpoint, s.payload.body]),
+    [[EP_A, '🍽️ Comida: Lentejas']],
+  );
+  assert.deepEqual(sentKeys(db, 'daily'), ['daily_2026-10-22_uA']);
+  sent = [];
+  await at(db, '09:30');
+  assert.equal(sent.length, 0);
+  await at(db, '10:05');
+  assert.deepEqual(
+    sent.map((s) => s.endpoint),
+    [EP_B],
+  );
+  sent = [];
+  await at(db, '10:10');
+  await at(db, '12:00');
+  assert.equal(sent.length, 0);
+  assert.deepEqual(sentKeys(db, 'daily'), ['daily_2026-10-22_uA', 'daily_2026-10-22_uB']);
+});
+
+test('prefs: without choices of their own, the household settings of earlier versions apply', async () => {
+  const db = new FakeFirestore();
+  seedHousehold(db);
+  menuToday(db);
+  db.write(H, { notify: { dailySummary: true, dailyHour: 9, activity: true } }, true);
+  prefs(db, 'uB', { dailyHour: 8 });
+  await at(db, '08:05');
+  assert.deepEqual(
+    sent.map((s) => s.endpoint),
+    [EP_B],
+  );
+  await at(db, '09:05');
+  assert.deepEqual(
+    sent.map((s) => s.endpoint),
+    [EP_B, EP_A],
+  );
+});
+
+test('prefs: turned off, or no device, means no morning summary (and done for the day)', async () => {
+  const db = new FakeFirestore();
+  seedHousehold(db);
+  menuToday(db);
+  db.write(H, { memberUids: ['uA', 'uB', 'uC'] }, true); // uC has no device
+  prefs(db, 'uB', { daily: false });
+  await at(db, '08:05');
+  assert.deepEqual(
+    sent.map((s) => s.endpoint),
+    [EP_A],
+  );
+  assert.deepEqual(sentKeys(db, 'daily'), ['daily_2026-10-22_uA', 'daily_2026-10-22_uB', 'daily_2026-10-22_uC']);
+  const prefsRead = db.readsUnder(`${H}/prefs`);
+  await at(db, '08:10');
+  assert.equal(db.readsUnder(`${H}/prefs`), prefsRead, 'everyone is done: choices not read again');
+});
+
+test('prefs: a household-wide summary recorded before this version counts for everyone that day', async () => {
+  const db = new FakeFirestore();
+  seedHousehold(db);
+  menuToday(db);
+  const earlier = zonedToUtc('2026-10-22', '08:00', TZ);
+  db.seed(`${H}/meta/notifier`, { sent: { 'daily_2026-10-22': earlier }, keyDatesOn: null, cleanedOn: '2026-10-22' });
+  await at(db, '08:05');
+  assert.equal(sent.length, 0);
+  assert.equal(db.readsUnder(`${H}/tasks`), 0, 'tasks not loaded');
+  assert.equal(db.readsUnder(`${H}/prefs`), 0, 'choices not read');
+  // The next day it's per person again
+  db.seed(`${H}/menu/2026-10-23`, { lunch: 'Sopa' });
+  await at(db, '08:05', '2026-10-23');
+  assert.equal(sent.length, 2);
+});
+
+test('prefs: choices are only read when something may be due', async () => {
+  const db = new FakeFirestore();
+  seedHousehold(db);
+  await at(db, '05:00'); // before any morning summary can be due
+  assert.equal(db.readsUnder(`${H}/prefs`), 0);
+  await at(db, '06:00'); // summaries may be due: read once per person with a device
+  assert.equal(db.readsUnder(`${H}/prefs`), 2);
+  assert.equal(db.readsUnder(`${H}/tasks`), 0, 'no window open yet: tasks not loaded');
+  await at(db, '08:05'); // windows open, nothing to say: done for today
+  assert.equal(db.readsUnder(`${H}/prefs`), 4);
+  assert.equal(db.readsUnder(`${H}/tasks`), 1);
+  await at(db, '08:10');
+  await at(db, '12:00');
+  assert.equal(db.readsUnder(`${H}/prefs`), 4, 'not read again');
+  assert.equal(db.readsUnder(`${H}/tasks`), 1);
+  db.seed(`${H}/events/e`, { ...dentist, startTime: '13:00', reminderMins: 0 });
+  await at(db, '13:00'); // a reminder is due
+  assert.equal(db.readsUnder(`${H}/prefs`), 6);
+  assert.equal(sent.length, 2);
 });

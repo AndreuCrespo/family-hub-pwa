@@ -2,7 +2,7 @@
 // plus paths that must not exist at all.
 import { assertFails, assertSucceeds } from '@firebase/rules-unit-testing';
 import { collection, deleteDoc, doc, type Firestore, getDoc, getDocs, setDoc, updateDoc } from 'firebase/firestore';
-import { beforeEach, describe, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import {
   ALICE,
   activity,
@@ -60,6 +60,103 @@ describe('prefs (own document only)', () => {
     await assertFails(setDoc(sub(db, 'prefs', ALICE), prefs({ updatedAt: 'now' })));
     await assertFails(setDoc(sub(db, 'prefs', ALICE), { dashboard: { order: [], hidden: [] } }));
     await assertFails(setDoc(sub(db, 'prefs', ALICE), prefs({ theme: 'dark' })));
+  });
+});
+
+describe('prefs.notify (personal notification choices)', () => {
+  const KINDS = ['shopping', 'event', 'task', 'note', 'expense', 'date', 'menu'];
+  const mine = (db: Firestore) => sub(db, 'prefs', ALICE);
+  const merge = (db: Firestore, notify: unknown) =>
+    setDoc(mine(db), { notify, updatedAt: Date.now() }, { merge: true });
+
+  it('accepts every key on its own', async () => {
+    const db = as(ALICE);
+    for (const kind of KINDS) {
+      await assertSucceeds(merge(db, { activity: { [kind]: false } }));
+      await assertSucceeds(merge(db, { activity: { [kind]: true } }));
+    }
+    await assertSucceeds(merge(db, { reminders: false }));
+    await assertSucceeds(merge(db, { keyDates: true }));
+    await assertSucceeds(merge(db, { daily: false }));
+    await assertSucceeds(merge(db, { dailyHour: 0 }));
+    await assertSucceeds(merge(db, { dailyHour: 23 }));
+  });
+
+  it('accepts partial and complete maps, with or without a dashboard', async () => {
+    const db = as(ALICE);
+    // A notify-only document (no dashboard saved yet).
+    await assertSucceeds(merge(db, { activity: { shopping: false } }));
+    await assertSucceeds(merge(db, { daily: true, dailyHour: 7 }));
+    await assertSucceeds(merge(db, {}));
+    await assertSucceeds(
+      setDoc(mine(db), {
+        notify: {
+          activity: Object.fromEntries(KINDS.map((k) => [k, true])),
+          reminders: true,
+          keyDates: false,
+          daily: true,
+          dailyHour: 9,
+        },
+        updatedAt: Date.now(),
+      }),
+    );
+  });
+
+  it('merging notify keeps the dashboard and earlier choices', async () => {
+    const db = as(ALICE);
+    await assertSucceeds(setDoc(mine(db), prefs(), { merge: true }));
+    await assertSucceeds(merge(db, { activity: { shopping: false } }));
+    await assertSucceeds(merge(db, { daily: true, dailyHour: 7 }));
+    await assertSucceeds(
+      setDoc(mine(db), { dashboard: { order: ['menu'], hidden: [] }, updatedAt: Date.now() }, { merge: true }),
+    );
+    const snap = await assertSucceeds(getDoc(mine(db)));
+    expect(snap.data()).toMatchObject({
+      dashboard: { order: ['menu'], hidden: [] },
+      notify: { activity: { shopping: false }, daily: true, dailyHour: 7 },
+    });
+  });
+
+  it('rejects unknown keys at both levels', async () => {
+    const db = as(ALICE);
+    await assertFails(merge(db, { sound: true }));
+    await assertFails(merge(db, { activity: { login: false } }));
+    await assertFails(merge(db, { activity: { shopping: false, groceries: false } }));
+    await assertFails(setDoc(mine(db), { notify: { daily: true }, other: 1, updatedAt: Date.now() }, { merge: true }));
+  });
+
+  it('rejects values of the wrong type', async () => {
+    const db = as(ALICE);
+    const bad: unknown[] = [
+      true,
+      'all',
+      { activity: true },
+      { activity: ['shopping'] },
+      { activity: { shopping: 'no' } },
+      { activity: { event: 0 } },
+      { activity: { task: null } },
+      { reminders: 'yes' },
+      { keyDates: 1 },
+      { daily: null },
+      { dailyHour: 24 },
+      { dailyHour: -1 },
+      { dailyHour: 7.5 },
+      { dailyHour: '7' },
+    ];
+    for (const notify of bad) {
+      await assertFails(merge(db, notify));
+    }
+    await assertFails(setDoc(mine(db), { notify: { daily: true } }));
+  });
+
+  it("cannot change another person's choices", async () => {
+    await seed(`households/${HID}/prefs/${BOB}`, prefs({ notify: { daily: true } }));
+    const db = as(ALICE);
+    await assertFails(
+      setDoc(sub(db, 'prefs', BOB), { notify: { daily: false }, updatedAt: Date.now() }, { merge: true }),
+    );
+    await assertFails(updateDoc(sub(db, 'prefs', BOB), { 'notify.daily': false }));
+    await assertFails(setDoc(sub(as(EVE), 'prefs', EVE), { notify: { daily: false }, updatedAt: Date.now() }));
   });
 });
 

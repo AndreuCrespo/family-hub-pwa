@@ -2,15 +2,28 @@
 // The shared date/recurrence modules have their own tests in src/shared.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { Activity, CalEvent, Household, KeyDate, Lang, MenuDay, Task } from '../../src/shared/types';
+import { resolveNotify } from '../../src/shared/notify';
+import type {
+  Activity,
+  CalEvent,
+  Household,
+  KeyDate,
+  Lang,
+  MenuDay,
+  PersonalNotify,
+  Task,
+} from '../../src/shared/types';
 import {
   activityDigest,
   type ComputeInput,
   computeNotifications,
+  dailyGateHour,
+  everyone,
   householdTz,
   type Message,
-  notifySettings,
+  openDailyUids,
   REMINDER_LOOKAHEAD_DAYS,
+  type Recipients,
   reminderFireAt,
 } from './logic';
 
@@ -58,9 +71,15 @@ const show = (m: Message, lang: Lang): Shown => ({
   toUids: m.toUids,
 });
 
+/** Every member with a device, with these choices (none = the household defaults). */
+const people = (household: Household, prefs: Record<string, PersonalNotify> = {}): Recipients =>
+  new Map(household.memberUids.map((uid) => [uid, resolveNotify(household, prefs[uid] ?? null)]));
+
 function compute(over: Partial<ComputeInput> & Pick<ComputeInput, 'now'>) {
+  const household = over.household ?? H;
   return computeNotifications({
-    household: H,
+    household,
+    recipients: people(household),
     events: [],
     tasks: [],
     menuToday: null,
@@ -79,17 +98,31 @@ const ofKind = (ms: Shown[], kind: Shown['kind']) => ms.filter((m) => m.kind ===
 // Settings
 // =====================================================================
 
-test('notifySettings: defaults and clamping', () => {
-  const s = (notify: unknown) => notifySettings({ notify: notify as Household['notify'] });
-  assert.deepEqual(s(undefined), { dailySummary: true, dailyHour: 8, activity: true });
-  assert.equal(s({ dailyHour: 25 }).dailyHour, 23);
-  assert.equal(s({ dailyHour: -3 }).dailyHour, 0);
-  assert.equal(s({ dailyHour: '7' }).dailyHour, 7);
-  assert.equal(s({ dailyHour: 7.9 }).dailyHour, 7);
-  assert.equal(s({ dailyHour: null }).dailyHour, 8);
-  assert.equal(s({ dailyHour: 'x' }).dailyHour, 8);
-  assert.equal(s({ dailySummary: false, activity: 0 }).dailySummary, false);
-  assert.equal(s({ activity: 0 }).activity, true); // only an explicit false turns it off
+test('without choices of their own, people get the household settings of earlier versions', () => {
+  const old = { ...H, notify: { dailySummary: true, dailyHour: 10, activity: false } };
+  const r = compute({
+    household: old,
+    now: Z('2026-10-22T08:05:00Z'), // 10:05
+    menuToday: { id: '2026-10-22', lunch: 'Paella' },
+    activity: [
+      {
+        id: 'a',
+        actorUid: 'u1',
+        actorName: 'Alex',
+        kind: 'shopping',
+        text: 'leche',
+        createdAt: Z('2026-10-22T08:04:00Z'),
+        notified: false,
+      },
+    ],
+  });
+  assert.deepEqual(
+    r.messages.map((m) => m.key ?? m.kind),
+    ['daily_2026-10-22_u1', 'daily_2026-10-22_u2'],
+    'summary at 10, no activity',
+  );
+  assert.equal(dailyGateHour(old), 6);
+  assert.equal(dailyGateHour({ notify: { dailySummary: true, dailyHour: 4, activity: true } }), 4);
 });
 
 test('householdTz: falls back to Madrid', () => {
@@ -124,7 +157,7 @@ test('timed event reminder', () => {
     url: '/#/calendar',
     tag: 'ev_dent_2026-10-22',
     urgency: 'high',
-    toUids: 'all',
+    toUids: ['u1', 'u2'],
   });
   // a different reminder is a different key
   assert.equal(
@@ -331,11 +364,16 @@ const dailyIn = { events: dayEvents, tasks, menuToday: menu, keyDates: [noaBirth
 test('daily summary', () => {
   const r = run({ ...dailyIn, now: Z('2026-10-22T06:05:00Z') });
   const d = ofKind(r.messages, 'daily');
-  assert.equal(d.length, 1);
-  assert.equal(d[0]?.key, 'daily_2026-10-22');
+  assert.deepEqual(
+    d.map((m) => [m.key, m.toUids, m.tag]),
+    [
+      ['daily_2026-10-22_u1', ['u1'], 'daily_2026-10-22'],
+      ['daily_2026-10-22_u2', ['u2'], 'daily_2026-10-22'],
+    ],
+    'one per person, the same tag',
+  );
   assert.equal(d[0]?.title, 'Buenos días · jueves 22');
   assert.equal(d[0]?.url, '/#/');
-  assert.deepEqual(d[0]?.toUids, 'all');
   assert.equal(
     d[0]?.body,
     [
@@ -360,7 +398,7 @@ test('daily summary', () => {
 
 test('daily summary: time window and settings', () => {
   const n = (now: string, over: Partial<ComputeInput> = {}) =>
-    ofKind(run({ ...dailyIn, now: Z(now), ...over }).messages, 'daily').length;
+    ofKind(run({ ...dailyIn, now: Z(now), ...over }).messages, 'daily').filter((m) => m.toUids.includes('u1')).length;
   assert.equal(n('2026-10-22T05:59:00Z'), 0); // 07:59
   assert.equal(n('2026-10-22T06:00:00Z'), 1); // 08:00
   assert.equal(n('2026-10-22T08:59:00Z'), 1); // 10:59
@@ -388,9 +426,13 @@ test('daily summary: time window and settings', () => {
 test('daily summary with nothing to say: no message, but done for today', () => {
   const r = compute({ now: Z('2026-10-22T06:30:00Z') });
   assert.equal(r.messages.length, 0);
-  assert.deepEqual(r.quietKeys, ['daily_2026-10-22']);
-  // Outside the window nothing is done
-  assert.deepEqual(compute({ now: Z('2026-10-22T12:00:00Z') }).quietKeys, []);
+  assert.deepEqual(r.quietKeys, ['daily_2026-10-22_u1', 'daily_2026-10-22_u2']);
+  // Before the window nothing is done yet; after it, it's over for today
+  assert.deepEqual(compute({ now: Z('2026-10-22T05:00:00Z') }).quietKeys, []);
+  assert.deepEqual(compute({ now: Z('2026-10-22T12:00:00Z') }).quietKeys, [
+    'daily_2026-10-22_u1',
+    'daily_2026-10-22_u2',
+  ]);
   assert.deepEqual(compute({ ...dailyIn, now: Z('2026-10-22T06:30:00Z') }).quietKeys, []);
 });
 
@@ -571,12 +613,12 @@ test('activity digest per person', () => {
   const alex = ms.find((m) => m.title === 'Alex');
   assert.equal(alex?.body, 'Ha añadido a la compra: leche, pan y huevos');
   assert.equal(alex?.url, '/#/shopping');
-  assert.deepEqual(alex?.toUids, { excludeUid: 'u1' });
+  assert.deepEqual(alex?.toUids, ['u2']);
   assert.equal(alex?.key, undefined);
   const sam = ms.find((m) => m.title === 'Sam');
   assert.equal(sam?.body, 'Nuevo evento: Dentista\nNueva tarea: Comprar regalo\nMenú actualizado');
   assert.equal(sam?.url, '/#/calendar');
-  assert.deepEqual(sam?.toUids, { excludeUid: 'u2' });
+  assert.deepEqual(sam?.toUids, ['u1']);
   assert.deepEqual([...r.activityIdsToMark].sort(), ['a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7', 'a9']);
 });
 
@@ -628,11 +670,11 @@ test("activity: the actor's name comes from the household, not from the document
 
 test('activity digest: whole burst on request, tag of its first item, kept for an hour', () => {
   const burst = [act('x1', 'u1', 'Alex', 'shopping', 'leche', 3, true), act('x2', 'u1', 'Alex', 'shopping', 'pan', 1)];
-  const [m] = activityDigest(burst, NOW, { includeNotified: true, members: H.members });
+  const [m] = activityDigest(burst, NOW, people(H), { includeNotified: true, members: H.members });
   assert.equal(m?.render('es').body, 'Ha añadido a la compra: leche y pan');
   assert.equal(m?.tag, `act_u1_${NOW - 3 * 60_000}`);
   assert.equal(m?.ttl, 3600);
-  assert.equal(activityDigest(burst, NOW)[0]?.render('es').body, 'Ha añadido a la compra: pan');
+  assert.equal(activityDigest(burst, NOW, people(H))[0]?.render('es').body, 'Ha añadido a la compra: pan');
 });
 
 test('all together: several things in one run', () => {
@@ -653,7 +695,8 @@ test('all together: several things in one run', () => {
       'kd_bnoa_2026-10-22_0',
       'kd_itv_2026-10-29_7',
       'kd_blia_2026-10-29_7',
-      'daily_2026-10-22',
+      'daily_2026-10-22_u1',
+      'daily_2026-10-22_u2',
       'activity',
       'activity',
     ],
@@ -675,7 +718,7 @@ test('en: event reminders', () => {
       url: '/#/calendar',
       tag: 'ev_dent_2026-10-22',
       urgency: 'high',
-      toUids: 'all',
+      toUids: ['u1', 'u2'],
     },
   ]);
   const body = (e: CalEvent, now: string) =>
@@ -708,7 +751,7 @@ test('en: event reminders', () => {
 test('en: daily summary', () => {
   const r = run({ ...dailyIn, now: Z('2026-10-22T06:05:00Z') }, 'en');
   const [d] = ofKind(r.messages, 'daily');
-  assert.equal(d?.key, 'daily_2026-10-22');
+  assert.equal(d?.key, 'daily_2026-10-22_u1');
   assert.equal(d?.title, 'Good morning · Thursday 22');
   assert.equal(d?.url, '/#/');
   assert.equal(
@@ -808,7 +851,7 @@ test('en: activity digest', () => {
   const alex = ms.find((m) => m.title === 'Alex');
   assert.equal(alex?.body, 'Added to the shopping list: leche, pan and huevos');
   assert.equal(alex?.url, '/#/shopping');
-  assert.deepEqual(alex?.toUids, { excludeUid: 'u1' });
+  assert.deepEqual(alex?.toUids, ['u2']);
   const sam = ms.find((m) => m.title === 'Sam');
   assert.equal(sam?.body, 'New event: Dentista\nNew task: Comprar regalo\nUpdated the menu');
   assert.equal(sam?.url, '/#/calendar');
@@ -839,7 +882,7 @@ test('en: activity digest', () => {
   );
   const anon = run({ now: NOW, activity: [act('z', '', ' ', 'note', 'Wifi', 1)] }, 'en');
   assert.equal(ofKind(anon.messages, 'activity')[0]?.title, 'Someone at home');
-  assert.deepEqual(ofKind(anon.messages, 'activity')[0]?.toUids, 'all');
+  assert.deepEqual(ofKind(anon.messages, 'activity')[0]?.toUids, ['u1', 'u2']);
 });
 
 test('each message renders in every language, the rest is shared', () => {
@@ -857,4 +900,121 @@ test('each message renders in every language, the rest is shared', () => {
     assert.ok(es.title && en.title && es.body && en.body, m.tag);
   }
   assert.notEqual(r.messages[0]?.render('en').body, r.messages[0]?.render('es').body);
+});
+
+// =====================================================================
+// Each person's choices
+// =====================================================================
+
+test('activity: each person only gets the kinds they chose, a mixed burst is filtered per person', () => {
+  const trio = { ...H, memberUids: ['u1', 'u2', 'u3'] };
+  const recipients = people(trio, {
+    u2: { activity: { event: false } }, // everything but events
+    u3: {
+      activity: { shopping: false, event: false, task: false, menu: false, expense: false, date: false, note: false },
+    },
+  });
+  const burst = [
+    act('m1', 'u1', 'Alex', 'shopping', 'leche', 3),
+    act('m2', 'u1', 'Alex', 'event', 'Cine', 2),
+    act('m3', 'u1', 'Alex', 'shopping', 'pan', 1),
+  ];
+  const ms = activityDigest(burst, NOW, recipients, { members: H.members });
+  assert.equal(ms.length, 1, 'u3 wants nothing, the actor never gets their own');
+  assert.deepEqual(ms[0]?.toUids, ['u2']);
+  assert.equal(ms[0]?.render('es').body, 'Ha añadido a la compra: leche y pan');
+
+  // Different choices ⇒ different messages, the same tag (a newer digest replaces the older one)
+  const split = activityDigest(burst, NOW, people(trio, { u3: { activity: { shopping: false } } }));
+  assert.deepEqual(
+    split.map((m) => [m.toUids, m.url, m.render('en').body]),
+    [
+      [['u2'], '/#/shopping', 'Added to the shopping list: leche and pan\nNew event: Cine'],
+      [['u3'], '/#/calendar', 'New event: Cine'],
+    ],
+  );
+  assert.equal(split[0]?.tag, split[1]?.tag);
+});
+
+test('activity: the actor never gets their own, whatever they chose', () => {
+  const ms = activityDigest([act('x', 'u1', 'Alex', 'note', 'Wifi', 1)], NOW, people(H));
+  assert.deepEqual(ms[0]?.toUids, ['u2']);
+  const alone = { ...H, memberUids: ['u1'] };
+  assert.deepEqual(activityDigest([act('x', 'u1', 'Alex', 'note', 'Wifi', 1)], NOW, people(alone)), []);
+});
+
+test('reminders and key dates only to the people who want them', () => {
+  const now = Z('2026-10-22T14:05:00Z');
+  const rem = (prefs: Record<string, PersonalNotify>) =>
+    compute({ events: [dentista], now, recipients: people(H, prefs) }).messages.map((m) => m.toUids);
+  assert.deepEqual(rem({ u2: { reminders: false } }), [['u1']]);
+  assert.deepEqual(rem({ u1: { reminders: false }, u2: { reminders: false } }), [], 'nobody: no message');
+
+  const kd = (prefs: Record<string, PersonalNotify>) =>
+    compute({ keyDates: [itv], now: Z('2026-10-22T07:10:00Z'), recipients: people(H, prefs) })
+      .messages.filter((m) => m.kind === 'keydate')
+      .map((m) => m.toUids);
+  assert.deepEqual(kd({ u1: { keyDates: false } }), [['u2']]);
+  assert.deepEqual(kd({ u1: { keyDates: false }, u2: { keyDates: false } }), []);
+});
+
+test('morning summary: each person at their own hour, nothing for those who turned it off', () => {
+  const recipients = people(H, { u1: { dailyHour: 7 }, u2: { dailyHour: 9 } });
+  const at = (iso: string, r: Recipients = recipients) =>
+    compute({ ...dailyIn, now: Z(iso), recipients: r }).messages.filter((m) => m.kind === 'daily');
+  assert.deepEqual(
+    at('2026-10-22T05:30:00Z').map((m) => m.key),
+    ['daily_2026-10-22_u1'],
+  ); // 07:30
+  assert.deepEqual(
+    at('2026-10-22T07:30:00Z').map((m) => m.key),
+    ['daily_2026-10-22_u1', 'daily_2026-10-22_u2'],
+  ); // 09:30: both windows open (the caller drops what was sent)
+  assert.deepEqual(
+    at('2026-10-22T08:05:00Z').map((m) => m.key),
+    ['daily_2026-10-22_u2'],
+  ); // 10:05: u1's is over
+  assert.equal(at('2026-10-22T05:30:00Z')[0]?.render('es').title, 'Buenos días · jueves 22');
+  // Kept until the end of each one's window
+  assert.equal(at('2026-10-22T05:30:00Z')[0]?.ttl, 150 * 60); // until 10:00 = 08:00Z
+
+  const off = people(H, { u2: { daily: false } });
+  const r = compute({ ...dailyIn, now: Z('2026-10-22T06:30:00Z'), recipients: off });
+  assert.deepEqual(
+    r.messages.filter((m) => m.kind === 'daily').map((m) => m.key),
+    ['daily_2026-10-22_u1'],
+  );
+  assert.deepEqual(r.quietKeys, ['daily_2026-10-22_u2'], 'turned off: done for today');
+  assert.deepEqual(openDailyUids(recipients, 8), ['u1']);
+  assert.deepEqual(openDailyUids(recipients, 9), ['u1', 'u2']);
+});
+
+test('morning summary: members without a device are done for today', () => {
+  const onlyU1: Recipients = new Map([['u1', resolveNotify(H, null)]]);
+  const r = compute({ ...dailyIn, now: Z('2026-10-22T06:30:00Z'), recipients: onlyU1 });
+  assert.deepEqual(
+    r.messages.filter((m) => m.kind === 'daily').map((m) => m.toUids),
+    [['u1']],
+  );
+  assert.deepEqual(r.quietKeys, ['daily_2026-10-22_u2']);
+});
+
+test("everyone(): what may be due before reading anyone's choices", () => {
+  const old = { ...H, notify: { dailySummary: true, dailyHour: 8, activity: false } };
+  const r = computeNotifications({
+    household: old,
+    recipients: everyone(old),
+    events: [dentista],
+    tasks: [],
+    menuToday: menu,
+    keyDates: [],
+    activity: [act('a', 'u1', 'Alex', 'shopping', 'leche', 1)],
+    now: Z('2026-10-22T14:05:00Z'),
+  });
+  // Activity counts even though the household default is off (someone may have turned it on);
+  // the morning summary is left out (it depends on each person's hour).
+  assert.deepEqual(
+    r.messages.map((m) => m.kind),
+    ['reminder', 'activity'],
+  );
 });

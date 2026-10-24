@@ -17,7 +17,7 @@ import { getTheme, setTheme, THEMES, type ThemePref } from '../../core/theme';
 import { t } from '../../i18n';
 import { LangSwitch } from '../../i18n/LangSwitch';
 import { LIMITS } from '../../shared/limits';
-import type { Member, NotifySettings } from '../../shared/types';
+import type { Member } from '../../shared/types';
 import { PageHead, Segmented } from '../../ui/primitives';
 import { DashboardEditor } from '../dashboard/DashboardEditor';
 import { useDashboardLayout } from '../dashboard/useDashboardLayout';
@@ -27,10 +27,9 @@ import { updatePushLang } from '../notifications/push';
 import { LocationSearch } from '../weather/LocationSearch';
 import { InviteSection } from './InviteSection';
 import { MemberEditor } from './MemberEditor';
-import { PushRow } from './PushRow';
+import { NotificationSettings } from './NotificationSettings';
 
 const THEME_LABEL = { auto: 'settings.themeAuto', light: 'settings.themeLight', dark: 'settings.themeDark' } as const;
-const DEFAULT_NOTIFY: NotifySettings = { dailySummary: true, dailyHour: 8, activity: true };
 
 export default function SettingsPage() {
   const { household, backend, members, user, demo, signOut } = useApp();
@@ -39,11 +38,8 @@ export default function SettingsPage() {
   const [theme, setThemeState] = useState<ThemePref>(getTheme);
   const [changingLoc, setChangingLoc] = useState(false);
   const [customizing, setCustomizing] = useState(false);
-  const notify: NotifySettings = { ...DEFAULT_NOTIFY, ...household.notify };
   // Accounts that joined but haven't said which member they are yet.
   const unclaimed = household.memberUids.filter((uid) => !members.some((m) => m.uid === uid));
-
-  const setNotify = (patch: Partial<NotifySettings>) => backend.updateHousehold({ notify: { ...notify, ...patch } });
 
   const memberStatus = (m: Member) => {
     if (m.kind === 'child') return t('settings.memberChild');
@@ -146,38 +142,7 @@ export default function SettingsPage() {
       <h2 className="section-title">
         <Bell size={14} aria-hidden="true" /> {t('settings.notifications')}
       </h2>
-      <div className="card stack gap-4">
-        <PushRow />
-        <label className="switch">
-          {t('settings.dailySummary')}
-          <input
-            type="checkbox"
-            checked={notify.dailySummary}
-            onChange={(e) => setNotify({ dailySummary: e.target.checked })}
-          />
-        </label>
-        {notify.dailySummary && (
-          <label className="field mb-8">
-            <span>{t('settings.summaryTime')}</span>
-            <select value={notify.dailyHour} onChange={(e) => setNotify({ dailyHour: Number(e.target.value) })}>
-              {[6, 7, 8, 9, 10].map((h) => (
-                <option key={h} value={h}>
-                  {h}:00
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
-        <label className="switch">
-          {t('settings.activity')}
-          <input
-            type="checkbox"
-            checked={notify.activity}
-            onChange={(e) => setNotify({ activity: e.target.checked })}
-          />
-        </label>
-        <p className="tiny muted pb-6">{t('settings.notifyTiming')}</p>
-      </div>
+      <NotificationSettings />
 
       <h2 className="section-title">
         <LayoutGrid size={14} aria-hidden="true" /> {t('nav.home')}

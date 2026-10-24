@@ -26,7 +26,7 @@ A shared calendar and household organizer for the whole family. It's a **Progres
 - **Expenses**: who paid what, who owes whom, and a monthly summary by category.
 - **Notes**: a shared board (guest Wi-Fi, useful phone numbers…).
 - **Weather** and **electricity price**: hourly Spanish regulated tariff (PVPC) and the cheapest hours to run the washing machine.
-- **Push notifications**: what the other person adds arrives instantly ("Sam added to the shopping list: milk, bread and eggs"), plus event reminders, a morning summary and upcoming key dates, each in the phone's language.
+- **Push notifications**: what the other person adds arrives instantly ("Sam added to the shopping list: milk, bread and eggs"), plus event reminders, a morning summary and upcoming key dates, each in the phone's language. **Each person chooses which ones they get** (for example, no shopping notifications) and the time of their morning summary.
 
 ---
 
@@ -166,7 +166,7 @@ Both values are saved in `functions/.env.YOUR-PROJECT`, which isn't committed. I
 
 ### d) Enable them on each phone
 
-In the app: **Settings → Notifications on this phone**. On iPhone the app must be installed on the Home Screen first, with iOS 16.4 or later. Notifications arrive in the language selected on that phone.
+In the app: **Settings → Notifications on this phone**. Below it, each person picks which notifications they want. On iPhone the app must be installed on the Home Screen first, with iOS 16.4 or later. Notifications arrive in the language selected on that phone.
 
 ---
 

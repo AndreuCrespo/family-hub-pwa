@@ -9,11 +9,21 @@ import type {
   Query,
 } from 'firebase-admin/firestore';
 import { addDays, type DateStr, isDateStr } from '../../src/shared/dates';
+import { resolveNotify } from '../../src/shared/notify';
 import type { Activity, CalEvent, Device, Freq, Household, KeyDate, MenuDay, Task } from '../../src/shared/types';
 import { errorText, householdTag, log } from './log';
-import { byCreation, DAY, REMINDER_LOOKAHEAD_DAYS } from './logic';
-import { type Data, parseActivity, parseDevice, parseEvent, parseKeyDate, parseMenuDay, parseTask } from './parse';
-import { isPushEndpoint } from './push';
+import { byCreation, DAY, REMINDER_LOOKAHEAD_DAYS, type Recipients } from './logic';
+import {
+  type Data,
+  parseActivity,
+  parseDevice,
+  parseEvent,
+  parseKeyDate,
+  parseMenuDay,
+  parsePrefs,
+  parseTask,
+} from './parse';
+import { canReceive } from './push';
 
 /** Activity documents are deleted after this long. */
 const ACTIVITY_KEEP = 7 * DAY;
@@ -32,23 +42,29 @@ async function docsOf<T>(q: Query, parse: (id: string, d: Data, createTime?: num
 
 // ---------- household data ----------
 
-/**
- * To avoid reading the whole collection on every run, only these are read:
- * one-off events starting from yesterday up to the longest reminder ahead, all
- * recurring ones and, when the daily summary is due, multi-day events still in progress.
- */
-export async function loadEvents(col: CollectionReference, today: DateStr, withOngoing: boolean): Promise<CalEvent[]> {
-  const queries: Query[] = [
-    col.where('date', '>=', addDays(today, -1)).where('date', '<=', addDays(today, REMINDER_LOOKAHEAD_DAYS)),
-    col.where('recurrence.freq', 'in', RECURRING),
-  ];
-  if (withOngoing) queries.push(col.where('endDate', '>=', today));
+/** Events of several queries, each once. */
+async function eventsOf(queries: Query[]): Promise<CalEvent[]> {
   const byId = new Map<string, CalEvent>();
   for (const list of await Promise.all(queries.map((q) => docsOf(q, parseEvent)))) {
     for (const e of list) byId.set(e.id, e);
   }
   return [...byId.values()];
 }
+
+/**
+ * To avoid reading the whole collection on every run, only these are read:
+ * one-off events starting from yesterday up to the longest reminder ahead, and
+ * all recurring ones.
+ */
+export const loadEvents = (col: CollectionReference, today: DateStr): Promise<CalEvent[]> =>
+  eventsOf([
+    col.where('date', '>=', addDays(today, -1)).where('date', '<=', addDays(today, REMINDER_LOOKAHEAD_DAYS)),
+    col.where('recurrence.freq', 'in', RECURRING),
+  ]);
+
+/** Multi-day events still in progress (for the morning summary). */
+export const loadOngoingEvents = (col: CollectionReference, today: DateStr): Promise<CalEvent[]> =>
+  eventsOf([col.where('endDate', '>=', today)]);
 
 export const loadPendingTasks = (col: CollectionReference): Promise<Task[]> =>
   docsOf(col.where('done', '==', false), parseTask);
@@ -64,6 +80,24 @@ export const loadPendingActivity = (col: CollectionReference): Promise<Activity[
   docsOf(col.where('notified', '==', false), parseActivity);
 
 export const loadDevices = (col: CollectionReference): Promise<Device[]> => docsOf(col, parseDevice);
+
+/**
+ * Who can be notified: household members with a device that can receive, each
+ * with their choices (prefs/{uid}.notify, one read per person) resolved against
+ * the household defaults.
+ */
+export async function loadRecipients(
+  db: Firestore,
+  ref: DocumentReference,
+  household: Household,
+): Promise<{ devices: Device[]; recipients: Recipients }> {
+  const devices = await loadDevices(ref.collection('devices'));
+  const members = new Set(household.memberUids);
+  const uids = [...new Set(devices.filter((d) => canReceive(d) && members.has(d.uid)).map((d) => d.uid))];
+  const prefs = uids.length ? await db.getAll(...uids.map((uid) => ref.collection('prefs').doc(uid))) : [];
+  const recipients = new Map(uids.map((uid, i) => [uid, resolveNotify(household, parsePrefs(prefs[i]?.data()))]));
+  return { devices, recipients };
+}
 
 /** Does anyone in the household have notifications on? (One read.) */
 export async function hasDevices(col: CollectionReference): Promise<boolean> {
@@ -189,7 +223,7 @@ export async function cleanup(db: Firestore, ref: DocumentReference, household: 
   const members = new Set(household.memberUids);
   const strayDevices = devices.docs.filter((s) => {
     const d = parseDevice(s.id, s.data());
-    return !d || !isPushEndpoint(d.subscription.endpoint) || (members.size > 0 && !members.has(d.uid));
+    return !d || !canReceive(d) || (members.size > 0 && !members.has(d.uid));
   });
   const doomed = [...oldActivity.docs, ...expiredInvites.docs, ...legacyLog.docs, ...strayDevices];
   const w = writer(db, household.id);

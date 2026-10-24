@@ -10,6 +10,7 @@ import type {
   KeyDate,
   MenuDay,
   Note,
+  PersonalNotify,
   ShoppingItem,
   Task,
 } from '../../shared/types';
@@ -18,6 +19,8 @@ import type {
 export interface Prefs {
   id: string;
   dashboard?: { order?: string[]; hidden?: string[] };
+  /** Which notifications this person gets. */
+  notify?: PersonalNotify;
   updatedAt?: number;
 }
 

@@ -41,6 +41,10 @@ export interface Invite {
   expiresAt: number;
 }
 
+/**
+ * Household-wide notification settings from earlier versions. Each person's
+ * own choices (PersonalNotify) take precedence; these are only their defaults.
+ */
 export interface NotifySettings {
   dailySummary: boolean;
   dailyHour: number; // local hour of the daily summary
@@ -152,6 +156,23 @@ export interface Device {
 }
 
 export type ActivityKind = 'shopping' | 'event' | 'task' | 'note' | 'expense' | 'date' | 'menu';
+
+/**
+ * What one person wants to be notified about (prefs/{uid}.notify). Missing
+ * fields fall back to the household defaults (see shared/notify.ts).
+ */
+export interface PersonalNotify {
+  /** What the others add, by kind ("Sam added milk"). */
+  activity?: Partial<Record<ActivityKind, boolean>>;
+  /** Event reminders. */
+  reminders?: boolean;
+  /** Upcoming key dates (birthdays, renewals…). */
+  keyDates?: boolean;
+  /** Morning summary. */
+  daily?: boolean;
+  /** Local hour of the morning summary (0–23). */
+  dailyHour?: number;
+}
 
 /** households/{hid}/activity/{id}: one thing someone added, written by the app and notified by the server. */
 export interface Activity {

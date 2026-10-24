@@ -1,7 +1,7 @@
 // Tests of the parsing of client-written documents.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { parseActivity, parseDevice, parseEvent, parseHousehold, parseKeyDate, parseTask } from './parse';
+import { parseActivity, parseDevice, parseEvent, parseHousehold, parseKeyDate, parsePrefs, parseTask } from './parse';
 
 test('events: dropped without a valid date, bad fields replaced', () => {
   assert.equal(parseEvent('e', {}), null);
@@ -73,4 +73,11 @@ test("activity: the server's creation time wins over the app's", () => {
   const a = parseActivity('a', { actorUid: 'u', createdAt: 1, text: 5, notified: 'no' }, 1000);
   assert.deepEqual(a, { id: 'a', actorUid: 'u', actorName: '', kind: '', text: '', createdAt: 1000, notified: false });
   assert.equal(parseActivity('a', { createdAt: 7 }).createdAt, 7);
+});
+
+test('prefs: the notify object, or nothing', () => {
+  assert.equal(parsePrefs(undefined), null);
+  assert.equal(parsePrefs({ dashboard: [] }), null);
+  assert.equal(parsePrefs({ notify: 'all' }), null);
+  assert.deepEqual(parsePrefs({ notify: { daily: false }, updatedAt: 1 }), { daily: false });
 });

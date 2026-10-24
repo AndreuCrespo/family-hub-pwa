@@ -405,13 +405,35 @@ service cloud.firestore {
 
       // ---- per-user preferences: each member only sees and writes their own
 
+      function validDashboard(b) {
+        return b is map
+          && hasShape(b, ['order', 'hidden'], [])
+          && isList(b.order, 30)                                 // LIMITS.dashboardWidgets
+          && isList(b.hidden, 30);
+      }
+
+      // What this person wants to be notified about (PersonalNotify in
+      // src/shared/types.ts). Every key is optional; missing ones fall back to
+      // the household defaults.
+      function validPersonalNotify(n) {
+        return n is map
+          && n.keys().hasOnly(['activity', 'reminders', 'keyDates', 'daily', 'dailyHour'])
+          && (!('activity' in n) || (n.activity is map
+              && n.activity.keys().hasOnly(['shopping', 'event', 'task', 'note', 'expense', 'date', 'menu'])
+              && n.activity.values().hasOnly([true, false])))
+          && (!('reminders' in n) || n.reminders is bool)
+          && (!('keyDates' in n) || n.keyDates is bool)
+          && (!('daily' in n) || n.daily is bool)
+          && (!('dailyHour' in n) || isIntIn(n.dailyHour, 0, 23));
+      }
+
+      // Written with set+merge: one write may add only the dashboard or only
+      // notify, so both are optional.
       function validPrefs(d) {
-        return hasShape(d, ['dashboard', 'updatedAt'], [])
-          && d.dashboard is map
-          && hasShape(d.dashboard, ['order', 'hidden'], [])
-          && isList(d.dashboard.order, 30)                       // LIMITS.dashboardWidgets
-          && isList(d.dashboard.hidden, 30)
-          && d.updatedAt is int;
+        return hasShape(d, ['updatedAt'], ['dashboard', 'notify'])
+          && d.updatedAt is int
+          && (!('dashboard' in d) || validDashboard(d.dashboard))
+          && (!('notify' in d) || validPersonalNotify(d.notify));
       }
 
       match /prefs/{uid} {

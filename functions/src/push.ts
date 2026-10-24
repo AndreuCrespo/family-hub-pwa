@@ -6,7 +6,7 @@ import { toLang } from '../../src/shared/locale';
 import { clip } from '../../src/shared/text';
 import type { Device, Lang } from '../../src/shared/types';
 import { log } from './log';
-import type { Audience, Message, MessageText } from './logic';
+import type { Message, MessageText } from './logic';
 
 /** Push services allow 4096 bytes; aes128gcm encryption leaves ~3993 of them for the payload. */
 export const MAX_PAYLOAD_BYTES = 3800;
@@ -38,23 +38,22 @@ export function isPushEndpoint(endpoint: string): boolean {
   return PUSH_HOSTS.has(host) || (host.endsWith(PUSH_HOST_SUFFIX) && host.length > PUSH_HOST_SUFFIX.length);
 }
 
-/**
- * Target devices of a message: those of current household members with a
- * complete subscription to a known push service, without repeated endpoints.
- */
+/** Can it receive anything? A complete subscription to a known push service. */
+export function canReceive(d: Pick<Device, 'subscription'>): boolean {
+  const s = d.subscription;
+  return Boolean(s?.endpoint && s.keys?.p256dh && s.keys?.auth && isPushEndpoint(s.endpoint));
+}
+
+/** Target devices of a message: those of its accounts that can receive, without repeated endpoints. */
 export function selectDevices<D extends Pick<Device, 'uid' | 'subscription'>>(
   devices: D[],
-  to: Audience,
-  memberUids: readonly string[],
+  toUids: readonly string[],
 ): D[] {
-  const members = new Set(memberUids);
+  const to = new Set(toUids);
   const seen = new Set<string>();
   return devices.filter((d) => {
-    const ep = d.subscription?.endpoint;
-    if (!ep || !d.subscription.keys?.p256dh || !d.subscription.keys?.auth || !isPushEndpoint(ep)) return false;
-    if (!members.has(d.uid) || (to !== 'all' && d.uid === to.excludeUid)) return false;
-    if (seen.has(ep)) return false;
-    seen.add(ep);
+    if (!to.has(d.uid) || !canReceive(d) || seen.has(d.subscription.endpoint)) return false;
+    seen.add(d.subscription.endpoint);
     return true;
   });
 }
@@ -134,11 +133,7 @@ export interface DeliveryReport {
  * Sends each message to its devices, each device in its own language. A
  * message counts as delivered unless every target failed with a temporary error.
  */
-export async function deliver(
-  messages: Message[],
-  devices: Device[],
-  memberUids: readonly string[],
-): Promise<DeliveryReport> {
+export async function deliver(messages: Message[], devices: Device[]): Promise<DeliveryReport> {
   const report: DeliveryReport = {
     delivered: new Set(),
     failed: new Set(),
@@ -162,7 +157,7 @@ export async function deliver(
         }
         return p;
       };
-      const targets = selectDevices(devices, m.toUids, memberUids);
+      const targets = selectDevices(devices, m.toUids);
       const outcomes = await Promise.all(
         targets.map((d) => {
           const lang = toLang(d.lang);

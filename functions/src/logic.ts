@@ -4,10 +4,12 @@
 // logic.test.ts).
 //
 // Every message is language-neutral (dedupe key, tag, link, audience) and
-// renders its title and body per language with the texts in i18n.ts, so all
-// the devices of a household get the same notifications, each in its language.
+// renders its title and body per language with the texts in i18n.ts. Its
+// audience is an explicit list of accounts, picked by each person's choices
+// (shared/notify.ts): what they want to hear about and when.
 import { addDays, type DateStr, diffDays, isTimeStr, parts, zonedParts, zonedToUtc } from '../../src/shared/dates';
 import { LIMITS } from '../../src/shared/limits';
+import { ACTIVITY_KINDS, DAILY_HOURS, type ResolvedNotify, resolveNotify } from '../../src/shared/notify';
 import { expandEvents, nextKeyDate, type Occurrence, occursOn } from '../../src/shared/recurrence';
 import { ALLDAY_BASE_MIN, MAX_REMINDER_MINS } from '../../src/shared/reminders';
 import { type Route, routePath } from '../../src/shared/routes';
@@ -22,7 +24,6 @@ import type {
   Lang,
   Member,
   MenuDay,
-  NotifySettings,
   Task,
 } from '../../src/shared/types';
 import { fmtTime, type Texts, texts } from './i18n';
@@ -62,9 +63,6 @@ const ACTIVITY_ITEM_CHARS = 80;
 
 // ---------- types ----------
 
-/** 'all' = every device in the household; excludeUid = everyone except that user's devices. */
-export type Audience = 'all' | { excludeUid: string };
-
 export type MessageKind = 'reminder' | 'keydate' | 'daily' | 'activity';
 
 export interface MessageText {
@@ -81,15 +79,20 @@ export interface Message {
   /** Notifications with the same tag replace each other on the device. */
   tag: string;
   urgency: 'high' | 'normal';
-  toUids: Audience;
+  /** Accounts whose devices get it. */
+  toUids: string[];
   /** Seconds the push service keeps it for a device that's offline. */
   ttl: number;
   /** Title and body in a language. */
   render(lang: Lang): MessageText;
 }
 
+/** Who can be notified (members with a device), each with their choices resolved. */
+export type Recipients = ReadonlyMap<string, ResolvedNotify>;
+
 export interface ComputeInput {
   household: Household;
+  recipients: Recipients;
   events: CalEvent[];
   tasks: Task[];
   menuToday?: MenuDay | null;
@@ -102,7 +105,10 @@ export interface ComputeResult {
   /** Everything due now, including what may have been sent already (the caller filters by key). */
   messages: Message[];
   activityIdsToMark: string[];
-  /** Keys handled without a message (a daily summary with nothing to say): record them as sent. */
+  /**
+   * Morning summaries done for today without a message (nothing to say, turned
+   * off, window over, no device): record them as sent.
+   */
   quietKeys: string[];
 }
 
@@ -126,25 +132,47 @@ export function householdTz(h: Pick<Household, 'timezone'>): string {
   return ok ? tz : DEFAULT_TZ;
 }
 
-export function notifySettings(h: Pick<Household, 'notify'>): NotifySettings {
-  const n: Partial<NotifySettings> = h.notify ?? {};
-  const hour = Number(n.dailyHour);
-  return {
-    dailySummary: n.dailySummary !== false,
-    dailyHour: Number.isFinite(hour) && n.dailyHour != null ? Math.min(23, Math.max(0, Math.trunc(hour))) : 8,
-    activity: n.activity !== false,
-  };
+/** Dedupe key of a person's morning summary. */
+export const dailyKey = (date: DateStr, uid: string) => `daily_${date}_${uid}`;
+/** Household-wide key of earlier versions: still means "sent" for everyone that day. */
+export const legacyDailyKey = (date: DateStr) => `daily_${date}`;
+
+/**
+ * Earliest local hour at which someone's morning summary can be due: the
+ * earliest the app offers, or the household's own setting from earlier versions.
+ */
+export function dailyGateHour(household: Pick<Household, 'notify'>): number {
+  return Math.min(...DAILY_HOURS, resolveNotify(household, null).dailyHour);
 }
 
-export const dailyKey = (date: DateStr) => `daily_${date}`;
-
-/** Are we in the daily summary's time window (regardless of whether it was already sent)? */
-export function isDailyWindow(h: Pick<Household, 'notify' | 'timezone'>, now: number): boolean {
-  const s = notifySettings(h);
-  if (!s.dailySummary) return false;
-  const hour = zonedParts(now, householdTz(h)).hour;
-  return hour >= s.dailyHour && hour < s.dailyHour + DAILY_WINDOW_HOURS;
+/** Where a person's morning summary stands at local `hour`. No device or turned off ⇒ nothing to do today. */
+function dailyStatus(r: ResolvedNotify | undefined, hour: number): 'open' | 'later' | 'done' {
+  if (!r?.daily || hour >= r.dailyHour + DAILY_WINDOW_HOURS) return 'done';
+  return hour < r.dailyHour ? 'later' : 'open';
 }
+
+/** People whose morning summary window is open at local `hour`. */
+export function openDailyUids(recipients: Recipients, hour: number): string[] {
+  return [...recipients].filter(([, r]) => dailyStatus(r, hour) === 'open').map(([uid]) => uid);
+}
+
+const ALL_ON: ResolvedNotify = {
+  activity: Object.fromEntries(ACTIVITY_KINDS.map((k) => [k, true])) as Record<ActivityKind, boolean>,
+  reminders: true,
+  keyDates: true,
+  daily: false,
+  dailyHour: 0,
+};
+
+/**
+ * Every member as if they wanted everything but the morning summary: to find
+ * out whether anything is due at all before reading anyone's choices.
+ */
+export const everyone = (h: Pick<Household, 'memberUids'>): Recipients =>
+  new Map(h.memberUids.map((uid) => [uid, ALL_ON]));
+
+const whoWants = (recipients: Recipients, wants: (r: ResolvedNotify) => boolean) =>
+  [...recipients].filter(([, r]) => wants(r)).map(([uid]) => uid);
 
 // ---------- helpers ----------
 
@@ -197,9 +225,16 @@ function reminderBody(o: Occurrence, today: DateStr, members: Member[], tx: Text
   return bits.join(' · ');
 }
 
-function eventReminders(events: CalEvent[], members: Member[], tz: string, today: DateStr, now: number): Message[] {
+function eventReminders(
+  events: CalEvent[],
+  members: Member[],
+  to: string[],
+  tz: string,
+  today: DateStr,
+  now: number,
+): Message[] {
   const withRem = events.filter((e) => validReminder(e.reminderMins));
-  if (!withRem.length) return [];
+  if (!withRem.length || !to.length) return [];
   const from = addDays(today, -1);
   const out: Message[] = [];
   for (const o of expandEvents(withRem, from, addDays(today, REMINDER_LOOKAHEAD_DAYS))) {
@@ -216,7 +251,7 @@ function eventReminders(events: CalEvent[], members: Member[], tz: string, today
       url: routePath('calendar'),
       tag: `ev_${ev.id}_${o.date}`,
       urgency: 'high',
-      toUids: 'all',
+      toUids: to,
       ttl: ttlUntil(start !== null ? start + REMINDER_GRACE_AFTER_START : endOfDay(o.date, tz), now),
       render(lang) {
         const tx = texts(lang);
@@ -273,8 +308,15 @@ function keyDateBody(kd: KeyDate, d: DateStr, today: DateStr, tx: Texts): string
   return hasAmount(kd) ? `${body} · ${tx.money(kd.amount)}` : body;
 }
 
-function keyDateMessages(keyDates: KeyDate[], today: DateStr, hour: number, tz: string, now: number): Message[] {
-  if (hour < KEYDATE_HOUR) return [];
+function keyDateMessages(
+  keyDates: KeyDate[],
+  to: string[],
+  today: DateStr,
+  hour: number,
+  tz: string,
+  now: number,
+): Message[] {
+  if (hour < KEYDATE_HOUR || !to.length) return [];
   const out: Message[] = [];
   for (const kd of keyDates) {
     const d = keyDateNext(kd, today);
@@ -291,7 +333,7 @@ function keyDateMessages(keyDates: KeyDate[], today: DateStr, hour: number, tz: 
         url: routePath('dates'),
         tag: `kd_${kd.id}_${d}`,
         urgency: 'normal',
-        toUids: 'all',
+        toUids: to,
         ttl: ttlUntil(endOfDay(today, tz), now),
         render(lang) {
           const tx = texts(lang);
@@ -373,17 +415,22 @@ function renderDaily(c: DailyContent, tx: Texts): MessageText {
 }
 
 /**
- * The daily summary when its time window is open: the message, or null when
- * there's nothing to tell today. Undefined outside the window.
+ * Morning summaries due now, one per person whose window is open (each in
+ * their own hour), and the people for whom it's done today without a message.
  */
-function dailySummary(
-  input: Pick<ComputeInput, 'household' | 'events' | 'tasks' | 'menuToday' | 'keyDates' | 'now'>,
-): { key: string; message: Message | null } | undefined {
-  const { household, now } = input;
-  if (!isDailyWindow(household, now)) return undefined;
+function dailySummaries(input: ComputeInput): { messages: Message[]; quietKeys: string[] } {
+  const { household, recipients, now } = input;
   const tz = householdTz(household);
   const { date: today, hour } = zonedParts(now, tz);
-  const key = dailyKey(today);
+  const quietKeys: string[] = [];
+  const open: [string, ResolvedNotify][] = [];
+  for (const uid of household.memberUids) {
+    const r = recipients.get(uid);
+    const status = dailyStatus(r, hour);
+    if (r && status === 'open') open.push([uid, r]);
+    else if (status === 'done') quietKeys.push(dailyKey(today, uid));
+  }
+  if (!open.length) return { messages: [], quietKeys };
 
   const content: DailyContent = {
     today,
@@ -403,24 +450,25 @@ function dailySummary(
     keyDates: input.keyDates.filter((kd) => keyDateNext(kd, today) === today),
   };
   const { events, lunch, dinner, tasks, keyDates } = content;
-  if (!events.length && !lunch && !dinner && !tasks.length && !keyDates.length) return { key, message: null };
+  if (!events.length && !lunch && !dinner && !tasks.length && !keyDates.length) {
+    return { messages: [], quietKeys: [...quietKeys, ...open.map(([uid]) => dailyKey(today, uid))] };
+  }
 
-  const settings = notifySettings(household);
-  const windowEnd = settings.dailyHour + DAILY_WINDOW_HOURS;
-  const until = windowEnd >= 24 ? endOfDay(today, tz) : zonedToUtc(today, `${windowEnd}:00`, tz);
-  return {
-    key,
-    message: {
-      key,
+  const messages = open.map(([uid, r]): Message => {
+    const windowEnd = r.dailyHour + DAILY_WINDOW_HOURS;
+    const until = windowEnd >= 24 ? endOfDay(today, tz) : zonedToUtc(today, `${windowEnd}:00`, tz);
+    return {
+      key: dailyKey(today, uid),
       kind: 'daily',
       url: routePath('home'),
-      tag: key,
+      tag: legacyDailyKey(today),
       urgency: 'normal',
-      toUids: 'all',
+      toUids: [uid],
       ttl: ttlUntil(until, now),
       render: (lang) => renderDaily(content, texts(lang)),
-    },
-  };
+    };
+  });
+  return { messages, quietKeys };
 }
 
 // ---------- activity ----------
@@ -448,14 +496,17 @@ function actorName(actorUid: string, fallback: string, members: Member[] | undef
 }
 
 /**
- * One notification per person with what they added. By default only counts
- * what wasn't notified yet; the instant function passes `includeNotified` to
- * rebuild the notification for the whole burst (same tag ⇒ it replaces the
- * previous one on the phone).
+ * One notification per person with what they added, to everyone else who has
+ * those kinds on; each recipient only sees the lines of the kinds they chose
+ * (nothing left ⇒ no message). By default only counts what wasn't notified
+ * yet; the instant function passes `includeNotified` to rebuild the
+ * notification for the whole burst (same tag ⇒ it replaces the previous one
+ * on the phone).
  */
 export function activityDigest(
   activity: Activity[],
   now: number,
+  recipients: Recipients,
   opts: { includeNotified?: boolean; members?: Member[] } = {},
 ): Message[] {
   const recent = activity
@@ -487,23 +538,38 @@ export function activityDigest(
     };
     const count = (k: string) => byKind.get(k)?.count ?? 0;
     const kinds = [...byKind.keys()].sort((a, b) => count(b) - count(a) || order(a) - order(b));
-    const dominant = KIND_ROUTE[kinds[0] as ActivityKind] as Route | undefined;
+
+    // Recipients grouped by the kinds of this burst they want (never the actor).
+    const groups = new Map<string, { kinds: string[]; uids: string[] }>();
+    for (const [uid, r] of recipients) {
+      if (uid === actorUid) continue;
+      const wanted = kinds.filter((k) => r.activity[k as ActivityKind] === true);
+      if (!wanted.length) continue;
+      const id = wanted.join(',');
+      const g = groups.get(id) ?? { kinds: wanted, uids: [] };
+      g.uids.push(uid);
+      groups.set(id, g);
+    }
+
     const name = actorName(actorUid, last.actorName, opts.members);
-    out.push({
-      kind: 'activity',
-      url: routePath(dominant ?? 'home'),
-      tag: `act_${actorUid || 'anon'}_${first.createdAt}`,
-      urgency: 'normal',
-      toUids: actorUid ? { excludeUid: actorUid } : 'all',
-      ttl: ACTIVITY_TTL_S,
-      render(lang) {
-        const tx = texts(lang);
-        return {
-          title: name || tx.someone,
-          body: kinds.map((k) => tx.activityLine(k, byKind.get(k)?.texts ?? [], MAX_ACTIVITY_ITEMS)).join('\n'),
-        };
-      },
-    });
+    for (const g of groups.values()) {
+      const dominant = KIND_ROUTE[g.kinds[0] as ActivityKind] as Route | undefined;
+      out.push({
+        kind: 'activity',
+        url: routePath(dominant ?? 'home'),
+        tag: `act_${actorUid || 'anon'}_${first.createdAt}`,
+        urgency: 'normal',
+        toUids: g.uids,
+        ttl: ACTIVITY_TTL_S,
+        render(lang) {
+          const tx = texts(lang);
+          return {
+            title: name || tx.someone,
+            body: g.kinds.map((k) => tx.activityLine(k, byKind.get(k)?.texts ?? [], MAX_ACTIVITY_ITEMS)).join('\n'),
+          };
+        },
+      });
+    }
   }
   return out;
 }
@@ -511,30 +577,42 @@ export function activityDigest(
 // ---------- main entry point ----------
 
 /**
- * Computes what a household has due right now. The lists may come pre-filtered
- * (see run.ts): it's enough that they include the events that start or fall
- * within [today−1, today+REMINDER_LOOKAHEAD_DAYS], the recurring ones, the
- * pending tasks and the key dates. Messages already sent are not filtered out
- * here: the caller drops the ones whose key it has recorded.
+ * Computes what a household has due right now, and for whom. The lists may
+ * come pre-filtered (see run.ts): it's enough that they include the events
+ * that start or fall within [today−1, today+REMINDER_LOOKAHEAD_DAYS], the
+ * recurring ones and the key dates, plus the pending tasks and today's menu
+ * when someone's morning summary is due. Messages already sent are not
+ * filtered out here: the caller drops the ones whose key it has recorded.
  */
 export function computeNotifications(input: ComputeInput): ComputeResult {
-  const { household, now } = input;
+  const { household, recipients, now } = input;
   const tz = householdTz(household);
   const { date: today, hour } = zonedParts(now, tz);
   const members = household.members ?? [];
 
+  const daily = dailySummaries(input);
   const messages: Message[] = [
-    ...eventReminders(input.events, members, tz, today, now),
-    ...keyDateMessages(input.keyDates, today, hour, tz, now),
+    ...eventReminders(
+      input.events,
+      members,
+      whoWants(recipients, (r) => r.reminders),
+      tz,
+      today,
+      now,
+    ),
+    ...keyDateMessages(
+      input.keyDates,
+      whoWants(recipients, (r) => r.keyDates),
+      today,
+      hour,
+      tz,
+      now,
+    ),
+    ...daily.messages,
+    ...activityDigest(input.activity, now, recipients, { members }),
   ];
-  const quietKeys: string[] = [];
-  const daily = dailySummary(input);
-  if (daily?.message) messages.push(daily.message);
-  else if (daily) quietKeys.push(daily.key);
-  if (notifySettings(household).activity) messages.push(...activityDigest(input.activity, now, { members }));
 
-  // All pending activity is marked (even if the notification is turned off or
-  // it's old) so it doesn't pile up.
+  // All pending activity is marked (even if nobody wants it or it's old) so it doesn't pile up.
   const activityIdsToMark = input.activity.filter((a) => !a.notified).map((a) => a.id);
-  return { messages, activityIdsToMark, quietKeys };
+  return { messages, activityIdsToMark, quietKeys: daily.quietKeys };
 }

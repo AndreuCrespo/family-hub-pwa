@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Device } from '../../src/shared/types';
-import { isPushEndpoint, MAX_PAYLOAD_BYTES, pushPayload, selectDevices } from './push';
+import { canReceive, isPushEndpoint, MAX_PAYLOAD_BYTES, pushPayload, selectDevices } from './push';
 
 test('only known push services over https', () => {
   for (const ok of [
@@ -30,7 +30,7 @@ test('only known push services over https', () => {
   }
 });
 
-test('device selection: members, audience, complete keys, no repeats', () => {
+test('device selection: its accounts, complete keys, known services, no repeats', () => {
   const sub = (n: number) => ({
     endpoint: `https://fcm.googleapis.com/fcm/send/${n}`,
     keys: { p256dh: 'p', auth: 'a' },
@@ -49,15 +49,14 @@ test('device selection: members, audience, complete keys, no repeats', () => {
       createdAt: 0,
     },
   ];
-  const members = ['u1', 'u2'];
-  const ids = (to: Parameters<typeof selectDevices>[1]) => selectDevices(devs, to, members).map((d) => d.id);
-  assert.deepEqual(ids('all'), ['d1', 'd2']);
-  assert.deepEqual(ids({ excludeUid: 'u1' }), ['d2']);
-  assert.deepEqual(ids({ excludeUid: 'u2' }), ['d1']);
-  assert.deepEqual(
-    selectDevices(devs, 'all', []).map((d) => d.id),
-    [],
-  );
+  const ids = (to: string[]) => selectDevices(devs, to).map((d) => d.id);
+  assert.deepEqual(ids(['u1', 'u2']), ['d1', 'd2']);
+  assert.deepEqual(ids(['u2']), ['d2']);
+  assert.deepEqual(ids(['u1']), ['d1']);
+  assert.deepEqual(ids([]), []);
+  assert.equal(canReceive(devs[0] as Device), true);
+  assert.equal(canReceive(devs[3] as Device), false);
+  assert.equal(canReceive(devs[5] as Device), false);
 });
 
 test('payload: as is when it fits', () => {
