@@ -527,6 +527,7 @@ export const en: Record<keyof typeof es, string> = {
   'settings.household': 'Household',
   'settings.exitDemo': 'Leave demo mode (deletes the sample data)',
   'settings.signOut': 'Sign out',
+  'settings.version': 'version {version}',
   'settings.editMember': 'Edit member',
   'settings.newMember': 'New member',
   'settings.needName': 'Enter a name',

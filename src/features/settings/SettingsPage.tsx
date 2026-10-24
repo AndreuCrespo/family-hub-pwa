@@ -14,6 +14,7 @@ import {
 import { useEffect, useRef, useState } from 'react';
 import { useApp } from '../../core/app';
 import { getTheme, setTheme, THEMES, type ThemePref } from '../../core/theme';
+import { APP_VERSION } from '../../core/version';
 import { t } from '../../i18n';
 import { LangSwitch } from '../../i18n/LangSwitch';
 import { LIMITS } from '../../shared/limits';
@@ -188,6 +189,7 @@ export default function SettingsPage() {
           <LogOut size={18} aria-hidden="true" /> {demo ? t('settings.exitDemo') : t('settings.signOut')}
         </button>
       </div>
+      <p className="tiny muted text-center mt-16">Casa {t('settings.version', { version: APP_VERSION })}</p>
 
       {editing && <MemberEditor member={editing === 'new' ? undefined : editing} onClose={() => setEditing(null)} />}
       {customizing && <DashboardEditor layout={layout} onClose={() => setCustomizing(false)} />}

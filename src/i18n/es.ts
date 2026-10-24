@@ -527,6 +527,7 @@ export const es = {
   'settings.household': 'Casa',
   'settings.exitDemo': 'Salir del modo demo (borra los datos de ejemplo)',
   'settings.signOut': 'Cerrar sesión',
+  'settings.version': 'versión {version}',
   'settings.editMember': 'Editar miembro',
   'settings.newMember': 'Nuevo miembro',
   'settings.needName': 'Escribe un nombre',

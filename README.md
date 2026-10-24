@@ -248,6 +248,8 @@ tests/rules/     Security rules tests (Firestore emulator)
 
 [GitHub Actions](.github/workflows/ci.yml) runs all the checks, the rules tests and a build on every push.
 
+**Versions**: `version` in `package.json` follows [semantic versioning](https://semver.org) and is listed in the [changelog](CHANGELOG.md). Each build shows its version at the bottom of Settings. To release one, update the changelog and run `npm version minor` (or `patch`), which commits the new version and tags it.
+
 > **WSL or Windows, not both.** `node_modules` contains native binaries for the system that ran `npm install` (Rolldown, TypeScript, esbuild). This project is installed from **WSL**. To use it from PowerShell, delete `node_modules` and `functions/node_modules` and reinstall there. With the project under `/mnt/d/...`, Vite polls for file changes so edits made from Windows are picked up too (already set in `vite.config.ts`).
 
 ## Ideas for later
