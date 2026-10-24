@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cheapestWindow, hourIndex, hourLabel, parsePvpc, priceLevel, priceStats } from './pvpc';
+import { cheapestWindow, hourIndex, hourLabel, isPvpcDay, parsePvpc, priceLevel, priceStats } from './pvpc';
 
 /** REE's answer for a day: one value per hour, with the Madrid offset of that hour. */
 function reeDay(entries: [time: string, offset: '+01:00' | '+02:00', eurPerMwh: number][], date: string) {
@@ -78,5 +78,16 @@ describe('prices', () => {
     expect(s.max).toBe(0.3);
     expect(priceLevel(0.05, s)).toBe('low');
     expect(priceLevel(0.3, s)).toBe('high');
+  });
+});
+
+describe('stored copies', () => {
+  it('accepts the current format and rejects the one of earlier versions', () => {
+    expect(isPvpcDay(null)).toBe(true);
+    expect(isPvpcDay({ date: '2026-10-24', hours: [{ start: 1_792_800_000_000, price: 0.1 }] })).toBe(true);
+    // Before 0.1.0 hours were { hour, price }.
+    expect(isPvpcDay({ date: '2026-10-24', hours: [{ hour: 9, price: 0.1 }] })).toBe(false);
+    expect(isPvpcDay({ date: '2026-10-24' })).toBe(false);
+    expect(isPvpcDay('nope')).toBe(false);
   });
 });

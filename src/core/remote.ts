@@ -15,6 +15,9 @@ interface Cached<T> {
   data: T;
 }
 
+/** Checks that a stored copy has the shape the app expects now. */
+export type Validator<T> = (data: unknown) => data is T;
+
 interface Entry<T> {
   state: RemoteState<T>;
   fetchedAt: number;
@@ -30,11 +33,17 @@ const CACHE_MAX_AGE = 3 * 86_400_000;
 const entries = new Map<string, Entry<unknown>>();
 const IDLE: RemoteState<never> = { loading: false };
 
+/** Deletes copies that are too old or from an earlier format. */
 function pruneCache() {
-  for (const k of keysWithPrefix(KEYS.cachePrefix)) {
-    const c = readJSON<Cached<unknown>>(k);
+  for (const k of keysWithPrefix(KEYS.cacheRoot)) {
+    const c = k.startsWith(KEYS.cachePrefix) ? readJSON<Cached<unknown>>(k) : null;
     if (!c || Date.now() - c.at > CACHE_MAX_AGE) removeKey(k);
   }
+}
+
+/** Deletes every stored copy (they are downloaded again when needed). */
+export function clearRemoteCache() {
+  for (const k of keysWithPrefix(KEYS.cacheRoot)) removeKey(k);
 }
 
 function setState<T>(e: Entry<T>, patch: Partial<RemoteState<T>>) {
@@ -61,10 +70,12 @@ function refresh<T>(key: string, e: Entry<T>, force = false) {
   );
 }
 
-function entryFor<T>(key: string, fetcher: () => Promise<T>, ttl: number): Entry<T> {
+function entryFor<T>(key: string, fetcher: () => Promise<T>, ttl: number, isValid?: Validator<T>): Entry<T> {
   let e = entries.get(key) as Entry<T> | undefined;
   if (!e) {
-    const cached = readJSON<Cached<T>>(KEYS.cachePrefix + key);
+    const stored = readJSON<Cached<unknown>>(KEYS.cachePrefix + key);
+    // A copy that doesn't look right is treated as missing (and downloaded again).
+    const cached = stored && (!isValid || isValid(stored.data)) ? (stored as Cached<T>) : null;
     e = {
       state: { data: cached?.data, loading: !cached },
       fetchedAt: cached?.at ?? 0,
@@ -106,10 +117,15 @@ const noop = () => {};
 
 /**
  * Data from `fetcher`, cached under `key` for `ttlMs`. A null key means there's
- * nothing to load (e.g. no location chosen yet).
+ * nothing to load (e.g. no location chosen yet). `isValid` checks stored copies.
  */
-export function useRemote<T>(key: string | null, fetcher: () => Promise<T>, ttlMs: number): RemoteState<T> {
-  const entry = key ? entryFor(key, fetcher, ttlMs) : null;
+export function useRemote<T>(
+  key: string | null,
+  fetcher: () => Promise<T>,
+  ttlMs: number,
+  isValid?: Validator<T>,
+): RemoteState<T> {
+  const entry = key ? entryFor(key, fetcher, ttlMs, isValid) : null;
   // The latest fetcher is used for the next refresh (it may close over new values).
   useEffect(() => {
     if (entry) entry.fetcher = fetcher;

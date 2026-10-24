@@ -45,6 +45,17 @@ async function fetchPvpc(date: string): Promise<PvpcDay | null> {
   return parsePvpc(date, (await r.json()) as ReeResponse);
 }
 
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
+
+/** A stored copy of a day (or null: not published yet) in the current format. */
+export function isPvpcDay(v: unknown): v is PvpcDay | null {
+  if (v === null) return true;
+  if (!isRecord(v) || typeof v.date !== 'string' || !Array.isArray(v.hours)) return false;
+  return v.hours.every(
+    (h: unknown) => isRecord(h) && Number.isFinite(h.start) && typeof h.price === 'number' && Number.isFinite(h.price),
+  );
+}
+
 /** Index of the hour containing `now`, or -1. */
 export function hourIndex(day: PvpcDay, now: number) {
   return day.hours.findIndex((h) => now >= h.start && now < h.start + 3_600_000);
@@ -58,10 +69,15 @@ export function usePvpc() {
   const now = useNow();
   const today = todayIn(PVPC_TZ, now);
   const madridHour = zonedParts(now, PVPC_TZ).hour;
-  const todayData = useRemote(`pvpc:${today}`, () => fetchPvpc(today), 6 * 3_600_000);
+  const todayData = useRemote(`pvpc:${today}`, () => fetchPvpc(today), 6 * 3_600_000, isPvpcDay);
   // Tomorrow's prices are published around 20:15 (peninsular time): ask again every hour until then.
   const tomorrow = addDays(today, 1);
-  const tomorrowData = useRemote(madridHour >= 20 ? `pvpc:${tomorrow}` : null, () => fetchPvpc(tomorrow), 3_600_000);
+  const tomorrowData = useRemote(
+    madridHour >= 20 ? `pvpc:${tomorrow}` : null,
+    () => fetchPvpc(tomorrow),
+    3_600_000,
+    isPvpcDay,
+  );
   const data = todayData.data ?? null;
   return {
     tz,

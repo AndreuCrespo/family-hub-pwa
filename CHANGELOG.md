@@ -2,6 +2,11 @@
 
 Versions follow [semantic versioning](https://semver.org). The running version is shown at the bottom of **Settings**.
 
+## 0.1.1 — 2026-10-24
+
+- Fix: the home screen showed "Something went wrong" on phones that still had electricity prices saved by an earlier version. Saved weather and prices now carry a format version and are checked before use.
+- The error screen shows the error details, and its Reload button also clears saved weather and prices.
+
 ## 0.1.0 — 2026-10-24
 
 First tagged version, in use by the family.

@@ -67,6 +67,7 @@ export const es = {
   'error.title': 'Algo ha fallado',
   'error.text': 'No se ha podido mostrar esta pantalla. Si acabamos de actualizar la app, recargar lo arregla.',
   'error.reload': 'Recargar',
+  'error.details': 'Detalles del error',
   'error.loading': 'No se pueden cargar algunos datos. Reintentando…',
   'error.permission': 'No tienes permiso para hacer esto.',
   'error.offline': 'Sin conexión: se guardará al volver la red.',

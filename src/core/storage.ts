@@ -10,8 +10,13 @@ export const KEYS = {
   household: 'casa-hid',
   /** Invite opened before signing in: { hid, code }. */
   invite: 'casa-invite',
-  /** Prefix of cached remote data (weather, electricity prices). */
-  cachePrefix: 'casa-cache:',
+  /** Prefix of every copy of remote data (weather, electricity prices), of any format. */
+  cacheRoot: 'casa-cache:',
+  /**
+   * Prefix of the copies in the current format. Change the version when the
+   * shape of cached data changes: older copies are then ignored and deleted.
+   */
+  cachePrefix: 'casa-cache:v2:',
   /** Prefix of demo mode data. */
   demoPrefix: 'casa-demo:',
 } as const;

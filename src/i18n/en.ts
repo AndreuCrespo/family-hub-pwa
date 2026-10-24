@@ -68,6 +68,7 @@ export const en: Record<keyof typeof es, string> = {
   'error.title': 'Something went wrong',
   'error.text': "This screen couldn't be shown. If the app was just updated, reloading fixes it.",
   'error.reload': 'Reload',
+  'error.details': 'Error details',
   'error.loading': "Some data can't be loaded. Retrying…",
   'error.permission': "You don't have permission to do this.",
   'error.offline': "Offline: it will be saved when you're back online.",

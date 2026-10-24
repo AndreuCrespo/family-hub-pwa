@@ -102,6 +102,20 @@ async function fetchWeather(lat: number, lon: number, tz: string): Promise<Weath
   };
 }
 
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
+
+/** A stored copy of the forecast in the current format. */
+export function isWeather(v: unknown): v is Weather {
+  if (!isRecord(v) || !isRecord(v.current) || !isRecord(v.hourly) || !isRecord(v.daily)) return false;
+  const { current, hourly, daily } = v;
+  return (
+    typeof current.temp === 'number' &&
+    typeof current.code === 'number' &&
+    ['time', 'temp', 'code', 'pop', 'isDay'].every((k) => Array.isArray(hourly[k])) &&
+    ['date', 'code', 'max', 'min', 'pop', 'sunrise', 'sunset'].every((k) => Array.isArray(daily[k]))
+  );
+}
+
 /** Forecast for the household's location (refreshed every 30 minutes). */
 export function useWeather() {
   const { household, tz } = useApp();
@@ -111,6 +125,7 @@ export function useWeather() {
     key,
     () => (loc ? fetchWeather(loc.lat, loc.lon, tz) : Promise.reject(new Error('No location'))),
     30 * 60_000,
+    isWeather,
   );
 }
 
